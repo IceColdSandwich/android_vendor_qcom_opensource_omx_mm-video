@@ -125,6 +125,12 @@ char ouputextradatafilename [] = "/data/extradata";
 #define MEM_DEVICE "/dev/pmem_smipool"
 #endif
 
+#ifdef MAX_RES_720P
+#define DEVICE_SCRATCH 0
+#else
+#define DEVICE_SCRATCH 64
+#endif
+
 #ifdef _ANDROID_
     extern "C"{
         #include<utils/Log.h>
@@ -385,7 +391,9 @@ void *get_omx_component_factory_fn(void)
 VideoHeap::VideoHeap(int devicefd, size_t size, void* base,
                      struct ion_handle *handle, int ionMapfd)
 {
-    ionInit(devicefd, base, size, 0 , MEM_DEVICE,handle,ionMapfd);
+    m_ion_device_fd = devicefd;
+    m_ion_handle = handle;
+    MemoryHeapBase::init(ionMapfd, base, size, 0, MEM_DEVICE);
 }
 #else
 VideoHeap::VideoHeap(int fd, size_t size, void* base)
@@ -1489,8 +1497,8 @@ OMX_ERRORTYPE omx_vdec::component_init(OMX_STRING role)
         }
         else
         {
-         h264_scratch.nAllocLen = drv_ctx.ip_buf.buffer_size;
-         h264_scratch.pBuffer = (OMX_U8 *)malloc (drv_ctx.ip_buf.buffer_size);
+         h264_scratch.nAllocLen = drv_ctx.ip_buf.buffer_size - DEVICE_SCRATCH;
+         h264_scratch.pBuffer = (OMX_U8 *)malloc (h264_scratch.nAllocLen);
          h264_scratch.nFilledLen = 0;
          h264_scratch.nOffset = 0;
 
@@ -3045,10 +3053,10 @@ OMX_ERRORTYPE  omx_vdec::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
              }
          }
          else if (portDefn->nBufferCountActual >= drv_ctx.ip_buf.mincount
-                  && portDefn->nBufferSize == drv_ctx.ip_buf.buffer_size)
+                  && portDefn->nBufferSize == (drv_ctx.ip_buf.buffer_size - DEVICE_SCRATCH))
          {
              drv_ctx.ip_buf.actualcount = portDefn->nBufferCountActual;
-             drv_ctx.ip_buf.buffer_size = portDefn->nBufferSize;
+             drv_ctx.ip_buf.buffer_size = portDefn->nBufferSize + DEVICE_SCRATCH;
              eRet = set_buffer_req(&drv_ctx.ip_buf);
          }
          else
@@ -4376,11 +4384,11 @@ OMX_ERRORTYPE omx_vdec::free_output_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
                     munmap (drv_ctx.ptr_outputbuffer[index].bufferaddr,
                             drv_ctx.ptr_outputbuffer[index].mmaped_size);
                }
+                close (drv_ctx.ptr_outputbuffer[index].pmem_fd);
+                drv_ctx.ptr_outputbuffer[index].pmem_fd = -1;
 #ifdef USE_ION
                 free_ion_memory(&drv_ctx.op_buf_ion_info[index]);
 #endif
-                close (drv_ctx.ptr_outputbuffer[index].pmem_fd);
-                drv_ctx.ptr_outputbuffer[index].pmem_fd = -1;
 #ifdef _ANDROID_
                 m_heap_ptr[index].video_heap_ptr = NULL;
                 m_heap_count = m_heap_count - 1;
@@ -4465,7 +4473,7 @@ OMX_ERRORTYPE omx_vdec::allocate_input_heap_buffer(OMX_HANDLETYPE       hComp,
     input->pBuffer           = (OMX_U8 *)buf_addr;
     input->nSize             = sizeof(OMX_BUFFERHEADERTYPE);
     input->nVersion.nVersion = OMX_SPEC_VERSION;
-    input->nAllocLen         = drv_ctx.ip_buf.buffer_size;
+    input->nAllocLen         = drv_ctx.ip_buf.buffer_size - DEVICE_SCRATCH;
     input->pAppPrivate       = appData;
     input->nInputPortIndex   = OMX_CORE_INPUT_PORT_INDEX;
     DEBUG_PRINT_LOW("\n Address of Heap Buffer %p",*bufferHdr );
@@ -4518,7 +4526,7 @@ OMX_ERRORTYPE  omx_vdec::allocate_input_buffer(
   unsigned char *buf_addr = NULL;
   int pmem_fd = -1;
 
-  if(bytes != drv_ctx.ip_buf.buffer_size)
+  if((bytes + DEVICE_SCRATCH) != drv_ctx.ip_buf.buffer_size)
   {
     DEBUG_PRINT_LOW("\n Requested Size is wrong %d epected is %d",
       bytes, drv_ctx.ip_buf.buffer_size);
@@ -4662,7 +4670,7 @@ OMX_ERRORTYPE  omx_vdec::allocate_input_buffer(
          input->pBuffer           = (OMX_U8 *)buf_addr;
     input->nSize             = sizeof(OMX_BUFFERHEADERTYPE);
     input->nVersion.nVersion = OMX_SPEC_VERSION;
-    input->nAllocLen         = drv_ctx.ip_buf.buffer_size;
+    input->nAllocLen         = drv_ctx.ip_buf.buffer_size - DEVICE_SCRATCH;
     input->pAppPrivate       = appData;
     input->nInputPortIndex   = OMX_CORE_INPUT_PORT_INDEX;
     input->pInputPortPrivate = (void *)&drv_ctx.ptr_inputbuffer [i];
@@ -7633,7 +7641,7 @@ OMX_ERRORTYPE omx_vdec::update_portdef(OMX_PARAM_PORTDEFINITIONTYPE *portDefn)
     portDefn->eDir =  OMX_DirInput;
     portDefn->nBufferCountActual = drv_ctx.ip_buf.actualcount;
     portDefn->nBufferCountMin    = drv_ctx.ip_buf.mincount;
-    portDefn->nBufferSize        = drv_ctx.ip_buf.buffer_size;
+    portDefn->nBufferSize        = drv_ctx.ip_buf.buffer_size - DEVICE_SCRATCH;
     portDefn->format.video.eColorFormat = OMX_COLOR_FormatUnused;
     portDefn->format.video.eCompressionFormat = eCompressionFormat;
     portDefn->bEnabled   = m_inp_bEnabled;
